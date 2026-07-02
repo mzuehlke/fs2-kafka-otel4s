@@ -103,14 +103,40 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
     }
   }
 
-  test("Stream[TracedKafkaConsumer].consumeChunkTraced delegates to traced consumeChunk") {
+  test("Stream[TracedKafkaConsumer].receiveChunk delegates to traced receiveChunk") {
     for {
       probe <- ConsumerSyntaxProbe.create()
       _ <- Stream
         .emit(probe)
-        .consumeChunkTraced(_ => IO.pure(CommitNow))
+        .receiveChunk(_ => IO.pure(CommitNow))
         .attempt
-      seen <- probe.consumeChunkCalled.get
+      seen <- probe.receiveChunkCalled.get
+    } yield assertEquals(seen, true)
+  }
+
+  test("Stream[TracedKafkaConsumer].consumeChunk delegates to traced consumeChunk") {
+    for {
+      processed <- Ref[IO].of(Option.empty[Chunk[ConsumerRecord[String, String]]])
+      record = ConsumerRecord("topic", 0, 1L, "k", "v")
+      probe <- ConsumerSyntaxProbe.create(
+        underlying = StubKafkaConsumer.streaming(List(StubKafkaConsumer.committableRecord(record)))
+      )
+      _ <- Stream
+        .emit(probe)
+        .consumeChunk(chunk => processed.set(Some(chunk)).as(CommitNow))
+        .attempt
+      seen <- processed.get
+    } yield assertEquals(seen, Some(Chunk.singleton(record)))
+  }
+
+  test("Stream[TracedKafkaConsumer].processChunk delegates to traced processChunk") {
+    for {
+      probe <- ConsumerSyntaxProbe.create()
+      _ <- Stream
+        .emit(probe)
+        .processChunk(_ => IO.unit)
+        .attempt
+      seen <- probe.processChunkCalled.get
     } yield assertEquals(seen, true)
   }
 
@@ -137,15 +163,21 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
       val receivedCommittableChunk: Ref[IO, Option[Chunk[CommittableConsumerRecord[IO, String, String]]]],
       val processedRecord: Ref[IO, Option[ConsumerRecord[String, String]]],
       val processedCommittable: Ref[IO, Option[CommittableConsumerRecord[IO, String, String]]],
-      val consumeChunkCalled: Ref[IO, Boolean],
+      val receiveChunkCalled: Ref[IO, Boolean],
+      val processChunkCalled: Ref[IO, Boolean],
       val recordsWithProcessCalled: Ref[IO, Boolean],
       recordsWithProcessResult: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.empty
   ) extends TracedKafkaConsumer[IO, String, String] {
 
-    override def consumeChunk(
+    override def receiveChunk(
         processor: Chunk[ConsumerRecord[String, String]] => IO[CommitNow]
     ): IO[Nothing] =
-      consumeChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
+      receiveChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
+
+    override def processChunk[A](
+        processor: ConsumerRecord[String, String] => IO[A]
+    ): IO[Nothing] =
+      processChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
 
     override def receive[A](
         records: Chunk[ConsumerRecord[String, String]]
@@ -174,6 +206,7 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
 
   object ConsumerSyntaxProbe {
     def create(
+        underlying: KafkaConsumer[IO, String, String] = StubKafkaConsumer.metadataOnly(),
         recordsWithProcessResult: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.empty
     ): IO[ConsumerSyntaxProbe] =
       for {
@@ -185,15 +218,17 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
         processedCommittable <- Ref[IO].of(
           Option.empty[CommittableConsumerRecord[IO, String, String]]
         )
-        consumeChunkCalled <- Ref[IO].of(false)
+        receiveChunkCalled <- Ref[IO].of(false)
+        processChunkCalled <- Ref[IO].of(false)
         recordsWithProcessCalled <- Ref[IO].of(false)
       } yield new ConsumerSyntaxProbe(
-        StubKafkaConsumer.metadataOnly(),
+        underlying,
         receiveChunk,
         receiveCommittableChunk,
         processedRecord,
         processedCommittable,
-        consumeChunkCalled,
+        receiveChunkCalled,
+        processChunkCalled,
         recordsWithProcessCalled,
         recordsWithProcessResult
       )

@@ -16,14 +16,161 @@
 
 package fs2.kafka.otel4s.trace
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import fs2.Chunk
 import fs2.kafka._
+import fs2.kafka.consumer.KafkaConsumeChunk.CommitNow
 import org.typelevel.otel4s.oteljava.testkit.trace._
 import org.typelevel.otel4s.semconv.experimental.attributes.MessagingExperimentalAttributes
 import org.typelevel.otel4s.trace.Tracer
+import org.apache.kafka.clients.consumer.OffsetAndMetadata
+import org.apache.kafka.common.TopicPartition
 
 final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
+
+  test("consumeChunk delegates to the underlying consumer without tracing") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        for {
+          processed <- Ref[IO].of(Option.empty[Chunk[ConsumerRecord[String, String]]])
+          commits <- Ref[IO].of(0)
+          record = ConsumerRecord("topic", 0, 1L, "k", "v")
+          consumer = StubKafkaConsumer.streaming(
+            List(committableRecord(record, commits))
+          )
+          traced <- testkit.tracedConsumer[String, String](consumer)
+          _ <- traced.consumeChunk { chunk =>
+            processed.set(Some(chunk)).as(CommitNow)
+          }.attempt
+          seen <- processed.get
+          commitCount <- commits.get
+          spans <- testkit.finishedSpans
+        } yield {
+          assertEquals(seen, Some(Chunk.singleton(record)))
+          assertEquals(commitCount, 1)
+          assertEquals(spans, Nil)
+        }
+      }
+  }
+
+  test("receiveChunk traces chunk delivery, invokes the processor, and commits offsets") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        for {
+          processed <- Ref[IO].of(Option.empty[Chunk[ConsumerRecord[String, String]]])
+          commits <- Ref[IO].of(0)
+          record = ConsumerRecord("topic", 0, 1L, "k", "v")
+          consumer = StubKafkaConsumer.streaming(
+            List(committableRecord(record, commits)),
+            clientId = "consumer-client",
+            groupId = "consumer-group"
+          )
+          traced <- testkit.tracedConsumer[String, String](consumer)
+          _ <- traced.receiveChunk { chunk =>
+            processed.set(Some(chunk)).as(CommitNow)
+          }.attempt
+          seen <- processed.get
+          commitCount <- commits.get
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertEquals(seen, Some(Chunk.singleton(record)))
+            assertEquals(commitCount, 1)
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(
+                  SpanExpectation
+                    .client("poll topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingSystem(
+                        MessagingExperimentalAttributes.MessagingSystemValue.Kafka
+                      ),
+                      MessagingExperimentalAttributes.MessagingDestinationName("topic"),
+                      MessagingExperimentalAttributes.MessagingDestinationPartitionId("0"),
+                      MessagingExperimentalAttributes.MessagingOperationName("poll"),
+                      MessagingExperimentalAttributes.MessagingOperationType("receive"),
+                      MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
+                      MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
+                    )
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("processChunk traces each processed record, and commits offsets") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        for {
+          processed <- Ref[IO].of(List.empty[ConsumerRecord[String, String]])
+          commits <- Ref[IO].of(0)
+          record1 = ConsumerRecord("topic", 0, 1L, "k1", "v1")
+          record2 = ConsumerRecord("topic", 0, 2L, "k2", "v2")
+          consumer = StubKafkaConsumer.streaming(
+            List(
+              committableRecord(record1, commits),
+              committableRecord(record2, commits)
+            ),
+            clientId = "consumer-client",
+            groupId = "consumer-group"
+          )
+          traced <- testkit.tracedConsumer[String, String](consumer)
+          _ <- traced
+            .processChunk(record => processed.update(_ :+ record))
+            .attempt
+          seen <- processed.get
+          commitCount <- commits.get
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertEquals(seen, List(record1, record2))
+            assertEquals(commitCount, 2)
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(
+                  SpanExpectation
+                    .consumer("process topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingSystem(
+                        MessagingExperimentalAttributes.MessagingSystemValue.Kafka
+                      ),
+                      MessagingExperimentalAttributes.MessagingDestinationName("topic"),
+                      MessagingExperimentalAttributes.MessagingDestinationPartitionId("0"),
+                      MessagingExperimentalAttributes.MessagingOperationName("process"),
+                      MessagingExperimentalAttributes.MessagingOperationType("process"),
+                      MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
+                      MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
+                    )
+                ),
+                root(
+                  SpanExpectation
+                    .consumer("process topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingSystem(
+                        MessagingExperimentalAttributes.MessagingSystemValue.Kafka
+                      ),
+                      MessagingExperimentalAttributes.MessagingDestinationName("topic"),
+                      MessagingExperimentalAttributes.MessagingDestinationPartitionId("0"),
+                      MessagingExperimentalAttributes.MessagingOperationName("process"),
+                      MessagingExperimentalAttributes.MessagingOperationType("process"),
+                      MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
+                      MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
+                    )
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
 
   test("process links propagated context and emits a process span") {
     KafkaTracerTestkit
@@ -164,5 +311,21 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
         } yield ()
       }
   }
+
+  private def committableRecord(
+      record: ConsumerRecord[String, String],
+      commits: Ref[IO, Int]
+  ): CommittableConsumerRecord[IO, String, String] =
+    CommittableConsumerRecord(
+      record,
+      CommittableOffset(
+        new TopicPartition(record.topic, record.partition),
+        new OffsetAndMetadata(record.offset + 1L),
+        KafkaCommitter[IO](
+          _ => commits.update(_ + 1),
+          IO.raiseError(new AssertionError("unexpected metadata"))
+        )
+      )
+    )
 
 }
