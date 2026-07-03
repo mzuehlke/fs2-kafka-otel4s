@@ -69,9 +69,9 @@ trait TracedKafkaConsumer[F[_], K, V] {
 
   /** Delegates to `underlying.consumeChunk` without adding tracing.
     *
-    * This passthrough keeps raw chunk-oriented `fs2-kafka` code available on the traced handle. Use [[receiveChunk]]
-    * when you want chunk-level `receive` spans, or [[processChunk]] when you want per-record `process` spans around
-    * record handling.
+    * This passthrough keeps raw chunk-oriented `fs2-kafka` code available on the traced handle. Use
+    * [[consumeChunkTraceReceive]] when you want chunk-level `receive` spans, or [[consumeChunkTraceProcess]] when you
+    * want per-record `process` spans around record handling.
     */
   final def consumeChunk(
       chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]
@@ -85,9 +85,9 @@ trait TracedKafkaConsumer[F[_], K, V] {
     * committable records are collected and committed after the callback effect completes successfully.
     *
     * This helper models chunk delivery with `receive` spans only. If you want per-record `process` spans, use
-    * [[processChunk]], [[recordsWithProcess]], or wrap explicit record handling with [[process]].
+    * [[consumeChunkTraceProcess]], [[recordsWithProcess]], or wrap explicit record handling with [[process]].
     */
-  def receiveChunk(chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]): F[Nothing]
+  def consumeChunkTraceReceive(chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]): F[Nothing]
 
   /** Consume from all assigned partitions concurrently, tracing processing of each record in each emitted chunk.
     *
@@ -96,7 +96,7 @@ trait TracedKafkaConsumer[F[_], K, V] {
     * using trace context extracted from that record's headers when available. Offsets from the corresponding
     * committable records are collected and committed after all records in the chunk have been processed successfully.
     */
-  def processChunk[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing]
+  def consumeChunkTraceProcess[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing]
 
   /** Evaluates `fa` inside a `poll` / `receive` span representing delivery of a non-committable chunk of records to
     * application code.
@@ -173,7 +173,7 @@ object TracedKafkaConsumer {
     private val groupId =
       underlying.settings.properties.get(ConsumerConfig.GROUP_ID_CONFIG)
 
-    override def receiveChunk(
+    override def consumeChunkTraceReceive(
         chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]
     ): F[Nothing] = {
       def handleChunk(chunk: Chunk[CommittableConsumerRecord[F, K, V]]): F[Unit] = {
@@ -185,7 +185,7 @@ object TracedKafkaConsumer {
       handleChunkImpl(handleChunk)
     }
 
-    override def processChunk[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing] = {
+    override def consumeChunkTraceProcess[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing] = {
       def handleChunk(chunk: Chunk[CommittableConsumerRecord[F, K, V]]): F[Unit] = {
         val (offsets, records) = offsetsAndRecords(chunk)
 

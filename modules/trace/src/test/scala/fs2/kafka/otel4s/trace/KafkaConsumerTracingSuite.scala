@@ -54,7 +54,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("receiveChunk traces chunk delivery, invokes the processor, and commits offsets") {
+  test("consumeChunkTraceReceive traces chunk delivery, invokes the processor, and commits offsets") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -68,7 +68,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
             groupId = "consumer-group"
           )
           traced <- testkit.tracedConsumer[String, String](consumer)
-          _ <- traced.receiveChunk { chunk =>
+          _ <- traced.consumeChunkTraceReceive { chunk =>
             processed.set(Some(chunk)).as(CommitNow)
           }.attempt
           seen <- processed.get
@@ -103,7 +103,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("processChunk traces each processed record, and commits offsets") {
+  test("consumeChunkTraceProcess traces each processed record, and commits offsets") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -122,7 +122,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
           )
           traced <- testkit.tracedConsumer[String, String](consumer)
           _ <- traced
-            .processChunk(record => processed.update(_ :+ record))
+            .consumeChunkTraceProcess(record => processed.update(_ :+ record))
             .attempt
           seen <- processed.get
           commitCount <- commits.get

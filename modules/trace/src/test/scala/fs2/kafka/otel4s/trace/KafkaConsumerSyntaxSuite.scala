@@ -103,14 +103,14 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
     }
   }
 
-  test("Stream[TracedKafkaConsumer].receiveChunk delegates to traced receiveChunk") {
+  test("Stream[TracedKafkaConsumer].consumeChunkTraceReceive delegates to traced consumeChunkTraceReceive") {
     for {
       probe <- ConsumerSyntaxProbe.create()
       _ <- Stream
         .emit(probe)
-        .receiveChunk(_ => IO.pure(CommitNow))
+        .consumeChunkTraceReceive(_ => IO.pure(CommitNow))
         .attempt
-      seen <- probe.receiveChunkCalled.get
+      seen <- probe.consumeChunkTraceReceiveCalled.get
     } yield assertEquals(seen, true)
   }
 
@@ -129,14 +129,14 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
     } yield assertEquals(seen, Some(Chunk.singleton(record)))
   }
 
-  test("Stream[TracedKafkaConsumer].processChunk delegates to traced processChunk") {
+  test("Stream[TracedKafkaConsumer].consumeChunkTraceProcess delegates to traced consumeChunkTraceProcess") {
     for {
       probe <- ConsumerSyntaxProbe.create()
       _ <- Stream
         .emit(probe)
-        .processChunk(_ => IO.unit)
+        .consumeChunkTraceProcess(_ => IO.unit)
         .attempt
-      seen <- probe.processChunkCalled.get
+      seen <- probe.consumeChunkTraceProcessCalled.get
     } yield assertEquals(seen, true)
   }
 
@@ -163,21 +163,21 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
       val receivedCommittableChunk: Ref[IO, Option[Chunk[CommittableConsumerRecord[IO, String, String]]]],
       val processedRecord: Ref[IO, Option[ConsumerRecord[String, String]]],
       val processedCommittable: Ref[IO, Option[CommittableConsumerRecord[IO, String, String]]],
-      val receiveChunkCalled: Ref[IO, Boolean],
-      val processChunkCalled: Ref[IO, Boolean],
+      val consumeChunkTraceReceiveCalled: Ref[IO, Boolean],
+      val consumeChunkTraceProcessCalled: Ref[IO, Boolean],
       val recordsWithProcessCalled: Ref[IO, Boolean],
       recordsWithProcessResult: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.empty
   ) extends TracedKafkaConsumer[IO, String, String] {
 
-    override def receiveChunk(
+    override def consumeChunkTraceReceive(
         processor: Chunk[ConsumerRecord[String, String]] => IO[CommitNow]
     ): IO[Nothing] =
-      receiveChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
+      consumeChunkTraceReceiveCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
 
-    override def processChunk[A](
+    override def consumeChunkTraceProcess[A](
         processor: ConsumerRecord[String, String] => IO[A]
     ): IO[Nothing] =
-      processChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
+      consumeChunkTraceProcessCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
 
     override def receive[A](
         records: Chunk[ConsumerRecord[String, String]]
@@ -210,7 +210,7 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
         recordsWithProcessResult: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.empty
     ): IO[ConsumerSyntaxProbe] =
       for {
-        receiveChunk <- Ref[IO].of(Option.empty[Chunk[ConsumerRecord[String, String]]])
+        consumeChunkTraceReceive <- Ref[IO].of(Option.empty[Chunk[ConsumerRecord[String, String]]])
         receiveCommittableChunk <- Ref[IO].of(
           Option.empty[Chunk[CommittableConsumerRecord[IO, String, String]]]
         )
@@ -218,17 +218,17 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
         processedCommittable <- Ref[IO].of(
           Option.empty[CommittableConsumerRecord[IO, String, String]]
         )
-        receiveChunkCalled <- Ref[IO].of(false)
-        processChunkCalled <- Ref[IO].of(false)
+        consumeChunkTraceReceiveCalled <- Ref[IO].of(false)
+        consumeChunkTraceProcessCalled <- Ref[IO].of(false)
         recordsWithProcessCalled <- Ref[IO].of(false)
       } yield new ConsumerSyntaxProbe(
         underlying,
-        receiveChunk,
+        consumeChunkTraceReceive,
         receiveCommittableChunk,
         processedRecord,
         processedCommittable,
-        receiveChunkCalled,
-        processChunkCalled,
+        consumeChunkTraceReceiveCalled,
+        consumeChunkTraceProcessCalled,
         recordsWithProcessCalled,
         recordsWithProcessResult
       )
