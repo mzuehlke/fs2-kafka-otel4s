@@ -16,6 +16,17 @@ ThisBuild / tlCiDependencyGraphJob := false
 
 ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"))
 
+val JFrogBase = java.net.URI.create("https://newwork.jfrog.io/")
+val JFrogReleases = "Artifactory nwse-packages-sbt-release" at JFrogBase.resolve("/artifactory/nwse-packages-sbt-release/").toString
+val JFrogSnapshots = "Artifactory nwse-packages-sbt-snapshot" at JFrogBase.resolve("/artifactory/nwse-packages-sbt-snapshot/").toString
+
+ThisBuild / publishTo := {
+  if (version.value.contains("SNAPSHOT"))
+    Some(JFrogSnapshots)
+  else
+    Some(JFrogReleases)
+}
+
 lazy val Versions = new {
   val fs2kafka = "4.1.0-RC1"
   val otel4s = "1.0.1"
