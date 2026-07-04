@@ -72,6 +72,7 @@ object KafkaTracer {
 
     private[otel4s] def tracerName: String
     private[otel4s] def constAttributes: Attributes
+    private[otel4s] def batchSpanMode: BatchSpanMode
     private[otel4s] def sendSpanSetup: SendSpanContext => Config.SpanSetup
     private[otel4s] def receiveSpanSetup: ReceiveSpanContext => Config.SpanSetup
     private[otel4s] def processSpanSetup: ProcessSpanContext => Config.SpanSetup
@@ -89,6 +90,14 @@ object KafkaTracer {
       * values take precedence.
       */
     def addConstAttributes(head: Attribute[?], tail: Attribute[?]*): Config
+
+    /** Selects how batches instrument records without recognized trace context in their Kafka headers.
+      *
+      * [[BatchSpanMode.PerRecordSpans]] creates a dedicated `create` span for every record without trace context.
+      * [[BatchSpanMode.SharedSendSpan]] instead injects the batch `send` span's context into those records. Existing
+      * valid record trace context is always preserved.
+      */
+    def withBatchSpanMode(mode: BatchSpanMode): Config
 
     /** Replaces the function used to derive producer-side `send` span setup from record metadata.
       *
@@ -201,6 +210,7 @@ object KafkaTracer {
       ConfigImpl(
         tracerName = Defaults.tracerName,
         constAttributes = Attributes.empty,
+        batchSpanMode = BatchSpanMode.PerRecordSpans,
         sendSpanSetup = Defaults.sendSpanSetup,
         receiveSpanSetup = Defaults.receiveSpanSetup,
         processSpanSetup = Defaults.processSpanSetup,
@@ -209,6 +219,7 @@ object KafkaTracer {
     final private case class ConfigImpl(
         tracerName: String,
         constAttributes: Attributes,
+        batchSpanMode: BatchSpanMode,
         sendSpanSetup: SendSpanContext => Config.SpanSetup,
         receiveSpanSetup: ReceiveSpanContext => Config.SpanSetup,
         processSpanSetup: ProcessSpanContext => Config.SpanSetup,
@@ -219,6 +230,9 @@ object KafkaTracer {
 
       override def addConstAttributes(head: Attribute[?], tail: Attribute[?]*): Config =
         copy(constAttributes = constAttributes + head ++ tail)
+
+      override def withBatchSpanMode(mode: BatchSpanMode): Config =
+        copy(batchSpanMode = mode)
 
       override def withSendSpanSetup(f: SendSpanContext => Config.SpanSetup): Config =
         copy(sendSpanSetup = f)
