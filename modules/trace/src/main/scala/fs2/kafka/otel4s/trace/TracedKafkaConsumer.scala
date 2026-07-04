@@ -85,16 +85,16 @@ trait TracedKafkaConsumer[F[_], K, V] {
     * committable records are collected and committed after the callback effect completes successfully.
     *
     * This helper models chunk delivery with `receive` spans only. If you want per-record `process` spans, use
-    * [[consumeChunkTraceProcess]], [[recordsWithProcess]], or wrap explicit record handling with [[process]].
+    * [[consumeChunkTraceProcess]], [[recordsWithProcess]], or wrap explicit record handling with `process`.
     */
   def consumeChunkTraceReceive(chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]): F[Nothing]
 
   /** Consume from all assigned partitions concurrently, tracing processing of each record in each emitted chunk.
     *
     * Each emitted committable chunk is split into offsets and plain [[ConsumerRecord]] values. The supplied
-    * `recordProcessor` is evaluated once per record inside [[process]], so each record gets its own `process` span
-    * using trace context extracted from that record's headers when available. Offsets from the corresponding
-    * committable records are collected and committed after all records in the chunk have been processed successfully.
+    * `recordProcessor` is evaluated once per record inside `process`, so each record gets its own `process` span using
+    * trace context extracted from that record's headers when available. Offsets from the corresponding committable
+    * records are collected and committed after all records in the chunk have been processed successfully.
     */
   def consumeChunkTraceProcess[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing]
 
