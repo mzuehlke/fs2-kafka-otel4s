@@ -35,7 +35,13 @@ import scala.util.chaining._
 /** A tracing handle bound to a specific [[fs2.kafka.KafkaProducer]].
   *
   * This handle keeps producer-specific tracing helpers explicit while still implementing [[fs2.kafka.KafkaProducer]].
-  * The traced `produce` implementation preserves fs2-kafka's original two-stage contract.
+  * The traced `produce` implementation preserves fs2-kafka's original two-stage contract and models message creation
+  * separately from the Kafka client send operation when necessary.
+  *
+  * A single record without an existing propagated creation context uses one `PRODUCER` `send` span and propagates that
+  * span's context. A single record with an existing context uses a linked `CLIENT` `send` span instead. A batch always
+  * uses a `CLIENT` `send` span; records without existing contexts receive individual `PRODUCER` `create` spans, and the
+  * send span links to one creation context per record.
   *
   * To ensure emitted `send` spans are finalized, callers should evaluate the returned await effect, for example via
   * `producer.produce(records).flatten`.
@@ -44,14 +50,57 @@ trait TracedKafkaProducer[F[_], K, V] extends KafkaProducer.WithSettings[F, K, V
 
   /** Injects the current tracing context into the headers of a single record without producing it.
     *
-    * If the record already carries a recognized propagated context, it is preserved as-is. When duplicate Kafka headers
-    * exist for the same propagation key, the last matching header determines the extracted context.
+    * A context is recognized when the configured propagator can extract a usable span context from the record headers.
+    * For example, when W3C Trace Context propagation is configured, this requires a structurally valid `traceparent`;
+    * an unsampled context is still valid. Other configured propagators, such as B3, may recognize different headers.
+    * When duplicate Kafka headers exist for the same propagation key, the last matching header determines the extracted
+    * context. Missing, malformed, or null authoritative values are treated as no context.
+    *
+    * If the record already carries a recognized context, it is preserved as-is. Otherwise the current span context is
+    * propagated when one exists. This method does not create a span.
+    *
+    * Most callers should not call this method before [[produce]], because `produce` automatically injects the
+    * appropriate context. Use it only when a specific current context should deliberately become the message-creation
+    * context before later publication. Doing so intentionally affects span topology: producing the injected record
+    * creates a `CLIENT` send span linked to that context, whereas producing the same record directly creates a
+    * `PRODUCER` send span and injects the send span's context.
     */
   def injectHeaders(record: ProducerRecord[K, V]): F[ProducerRecord[K, V]]
 
-  /** Injects the current tracing context into the headers of all records in a batch without producing them.
+  /** Injects the current tracing context into the headers of all records in a batch without producing them or creating
+    * spans.
+    *
+    * Most callers should pass the batch directly to [[produce]], which automatically injects an appropriate context for
+    * every record. Use this method only when a specific current context should deliberately become the creation context
+    * before later publication.
+    *
+    * Existing recognized contexts are preserved independently for each record. Records without one receive the current
+    * span context when it exists. Injecting the same current application context into an otherwise uninstrumented batch
+    * means the later batch send links once per record to that shared context and does not synthesize per-record
+    * `create` spans. Directly producing that batch would synthesize a distinct creation span and context for every
+    * record.
     */
   def injectHeaders(records: ProducerRecords[K, V]): F[ProducerRecords[K, V]]
+
+  /** Produces records using fs2-kafka's two-stage contract and traces message creation and sending.
+    *
+    * Span creation follows these rules:
+    *
+    *   - empty input delegates to the underlying producer and creates no spans;
+    *   - one record without a recognized propagated context creates one `PRODUCER` `send <topic>` span, with no links,
+    *     and injects that span's context into the record;
+    *   - one record with a recognized context creates one `CLIENT` `send <topic>` span linked to that context and
+    *     preserves the record headers;
+    *   - a batch creates one `CLIENT` send span with one link per record. Each missing creation context is supplied by
+    *     a generated `PRODUCER` `create <topic>` span, while existing contexts are preserved and linked directly.
+    *
+    * The ambient current span remains the normal parent of producer spans. Contexts extracted from record headers are
+    * represented as links rather than selected as parents.
+    *
+    * The outer effect submits the records. The returned effect waits for Kafka completion and finalizes the send span.
+    * Callers should normally evaluate both stages with `produce(records).flatten`.
+    */
+  override def produce(records: ProducerRecords[K, V]): F[F[ProducerResult[K, V]]]
 
   /** Switches serializers while preserving tracing semantics for the new key type.
     *

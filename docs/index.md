@@ -108,6 +108,28 @@ def sendBatch(
     .flatten
 ```
 
+### Producer span model
+
+Producer spans depend on the number of records and whether each record already carries a valid propagated message-creation context:
+
+In the table below, **existing creation context** means a valid span context already encoded in the record's Kafka headers and recognized by the configured propagator. It may have been injected earlier by application code or received from another component. An ambient current span by itself is not an existing creation context until its context has been injected into the record headers.
+
+| Records | Existing creation context | Spans |
+| --- | --- | --- |
+| Empty | — | No spans |
+| One | No | One `PRODUCER` span named `send <topic>`; its context is injected into the record |
+| One | Yes | One `CLIENT` span named `send <topic>`, linked to the existing context; existing headers are preserved |
+| Batch | Missing on some or all records | One `PRODUCER` span named `create <topic>` for each missing context, plus one linked `CLIENT` send span |
+| Batch | Present on every record | One `CLIENT` send span with one link per record and no create spans |
+
+A propagated context is valid when the configured OpenTelemetry propagator can extract a usable span context from the Kafka headers. For example, when W3C Trace Context propagation is configured, this means a structurally valid `traceparent`. An unsampled context is still valid. Missing, malformed, or null authoritative headers are treated as no context. For duplicate propagation headers, the last matching header is authoritative. Other configured propagators, such as B3, may recognize different headers.
+
+For batches, the send span is always `CLIENT`. It contains one link per record. Each link targets either the record's existing creation context or the generated create span and carries record-specific destination, partition, key, and tombstone attributes when available.
+
+All producer spans use the ambient current span as their normal parent. A context extracted from record headers is represented by a link rather than used as the send span's parent.
+
+See [Producer instrumentation](docs/producer-instrumentation.md) for the complete span matrix, attributes, lifecycle, error behavior, and transactional details.
+
 The syntax import lets you bind tracing at the stream boundary and keep the rest of the producer API unchanged:
 
 ```scala mdoc:silent
@@ -144,7 +166,15 @@ def sendTransactionally(
   )
 ```
 
-`produce` injects propagation headers automatically. Use `injectHeaders` only when record construction and publication are decoupled and you need to preserve the current tracing context across that gap.
+`produce` injects propagation headers automatically. In normal use, pass records directly to `produce`; do not call `injectHeaders` yourself.
+
+Use `injectHeaders` only when a specific current span should deliberately become the message-creation context before later publication, such as when record construction and publication are decoupled. Explicit injection changes the telemetry when the record does not already have a context.
+
+If an application span is current, `injectHeaders(record)` followed by `produce(ProducerRecords.one(record))` preserves that application context and creates a linked `CLIENT` send span. Direct `produce(ProducerRecords.one(record))` instead creates a `PRODUCER` send span and injects the send span's own context. Consumers therefore correlate with the application span in the first flow and with the producer send span in the second.
+
+If the record already has a valid context, `injectHeaders` preserves it and both flows have the same topology. If no span context is current during explicit injection, no new usable creation context can be propagated and the subsequent `produce` follows the direct-production behavior.
+
+For a batch, explicitly injecting the same current application context into every record suppresses the per-record create spans: the batch send span links once per record to that shared context. Directly producing an uninstrumented batch creates a distinct create span and propagated context for every record.
 
 ```scala mdoc:silent
 def prepareRecord(

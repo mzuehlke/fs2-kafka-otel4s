@@ -20,7 +20,8 @@ package fs2.kafka.otel4s.trace
   *
   * This context describes the produced batch at the point where `fs2-kafka-otel4s` is about to create a producer span.
   * It combines dynamic record information such as topics, partitions, and batch size with static producer metadata
-  * captured from the bound Kafka producer.
+  * captured from the bound Kafka producer. It customizes send-span setup only; producer instrumentation independently
+  * determines the span kind, creation-context links, and whether batch records need dedicated `create` spans.
   */
 sealed trait SendSpanContext {
 
