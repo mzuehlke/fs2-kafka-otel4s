@@ -42,7 +42,8 @@ trait KafkaTracer[F[_]] {
   /** Creates a producer-bound tracing handle.
     *
     * The handle captures static producer metadata such as `client.id` from the producer itself and traces the
-    * producer's standard two-stage `produce` operations.
+    * producer's standard two-stage `produce` operations. See [[TracedKafkaProducer]] for the single-record and batch
+    * span model, propagated-context handling, and the effect of explicit header injection.
     */
   def producer[K: KafkaMessageKey, V](
       producer: KafkaProducer.WithSettings[F, K, V]
@@ -90,6 +91,10 @@ object KafkaTracer {
     def addConstAttributes(head: Attribute[?], tail: Attribute[?]*): Config
 
     /** Replaces the function used to derive producer-side `send` span setup from record metadata.
+      *
+      * This function controls the send span's name, extra attributes, and finalization strategy. It does not control
+      * whether the send span is `PRODUCER` or `CLIENT`, which contexts are linked, or whether per-record `create` spans
+      * are generated.
       */
     def withSendSpanSetup(f: SendSpanContext => Config.SpanSetup): Config
 
