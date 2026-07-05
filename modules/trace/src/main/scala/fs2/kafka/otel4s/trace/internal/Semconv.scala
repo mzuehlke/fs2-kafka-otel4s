@@ -78,13 +78,12 @@ private[otel4s] object Semconv {
       Keys.DestinationPartitionId.maybe(producerSingleLogicalPartition(records).map(_.toString))
     )
 
-    // `messaging.kafka.message.key` and `messaging.kafka.message.tombstone` are attached at the
-    // span level only when this send span still represents exactly one produced message. For true
-    // batches, per-message detail moves to links instead of collapsing multiple values onto the span.
+    // `messaging.kafka.message.key` applies only to single-message Kafka operations. Tombstone applies
+    // to a batch span when every record is a tombstone; mixed values remain on per-record links.
     // See:
     // https://opentelemetry.io/docs/specs/semconv/messaging/messaging-spans/
     builder.addAll(Keys.KafkaMessageKey.maybe(ctx.messageKey))
-    builder.addAll(Keys.KafkaMessageTombstone.maybe(producerSingleRecordTombstone(records)))
+    builder.addAll(Keys.KafkaMessageTombstone.maybe(producerCommonTombstone(records)))
 
     // `messaging.batch.message_count` is emitted only for actual batches, following the messaging
     // span guidance that batch-only metadata should not be set on single-message operations.
@@ -153,7 +152,7 @@ private[otel4s] object Semconv {
   def sendLinkAttributes[K: KafkaMessageKey, V](record: ProducerRecord[K, V]): Attributes = {
     val builder = Attributes.newBuilder
 
-    // Send links describe the message creation context or create span associated with one produced
+    // Send links describe the record trace context or create span associated with one produced
     // record. We keep per-record Kafka details on the link so batch send spans do not need to
     // collapse multiple destinations or keys into one span-level value.
     builder.addOne(Keys.DestinationName(record.topic))
@@ -258,12 +257,10 @@ private[otel4s] object Semconv {
       .when(records.size == 1)(records.head.get)
       .flatMap(record => KafkaMessageKey[K].toMessageKey(record.key))
 
-  private def producerSingleRecordTombstone[K, V](
+  private def producerCommonTombstone[K, V](
       records: ProducerRecords[K, V]
   ): Option[Boolean] =
-    Option
-      .when(records.size == 1)(records.head.get)
-      .flatMap(record => tombstoneAttribute(record.value))
+    Option.when(records.nonEmpty && records.iterator.forall(_.value == null))(true)
 
   private def consumerSingleRecordMessageKey[K: KafkaMessageKey, V](
       records: Chunk[ConsumerRecord[K, V]]

@@ -172,7 +172,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("process links propagated context and emits a process span") {
+  test("process links record trace context and emits a process span") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -239,7 +239,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("receive emits a poll span and links to message creation contexts") {
+  test("receive emits a poll span and links to record trace contexts") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>

@@ -13,7 +13,7 @@ Create normal `fs2-kafka` settings first. If you want stable broker endpoint att
 ```scala mdoc:silent
 import cats.effect.IO
 import fs2.kafka.{ConsumerSettings, Deserializer, ProducerSettings, Serializer}
-import fs2.kafka.otel4s.trace.KafkaTracer
+import fs2.kafka.otel4s.trace.{BatchSpanMode, KafkaTracer}
 import org.typelevel.otel4s.trace.TracerProvider
 
 val producerSettings: ProducerSettings[IO, String, String] =
@@ -36,6 +36,10 @@ val consumerSettings: ConsumerSettings[IO, String, String] =
 val tracerConfig: KafkaTracer.Config =
   KafkaTracer.Config.default
     .withServerAddress("kafka.internal", Some(9092))
+
+val lowerVolumeTracerConfig: KafkaTracer.Config =
+  KafkaTracer.Config.default
+    .withBatchSpanMode(BatchSpanMode.SharedSendSpan)
 ```
 
 Create `KafkaTracer` once from the `TracerProvider`, then bind traced handles from normal `fs2-kafka` resources:
@@ -110,21 +114,26 @@ def sendBatch(
 
 ### Producer span model
 
-Producer spans depend on the number of records and whether each record already carries a valid propagated message-creation context:
+Producer spans depend on the number of records, whether each record already has trace context in its Kafka headers, and the configured `BatchSpanMode`.
 
-In the table below, **existing creation context** means a valid span context already encoded in the record's Kafka headers and recognized by the configured propagator. It may have been injected earlier by application code or received from another component. An ambient current span by itself is not an existing creation context until its context has been injected into the record headers.
+In the table below, **record trace context** means a valid span context encoded in the record's Kafka headers and recognized by the configured propagator. It may have been injected earlier by application code or received from another component. An ambient current span by itself is not record trace context until its context has been injected into the headers.
 
-| Records | Existing creation context | Spans |
+OpenTelemetry calls the trace context propagated with a message its _message creation context_. This documentation uses _record trace context_ to make clear that it is serialized trace information in the Kafka record headers, not an active context or necessarily a parent span.
+
+| Records and trace headers | `PerRecordSpans` (default) | `SharedSendSpan` |
 | --- | --- | --- |
-| Empty | — | No spans |
-| One | No | One `PRODUCER` span named `send <topic>`; its context is injected into the record |
-| One | Yes | One `CLIENT` span named `send <topic>`, linked to the existing context; existing headers are preserved |
-| Batch | Missing on some or all records | One `PRODUCER` span named `create <topic>` for each missing context, plus one linked `CLIENT` send span |
-| Batch | Present on every record | One `CLIENT` send span with one link per record and no create spans |
+| Empty | No spans | No spans |
+| One, no trace context | One `PRODUCER` `send <topic>`; inject its context | Same |
+| One, trace context present | One linked `CLIENT` `send <topic>`; preserve the context | Same |
+| Batch, no record has trace context | One `PRODUCER` create span per record plus one `CLIENT` send with one link per record | One `PRODUCER` send; inject the same send context into every record; no send links |
+| Batch, trace context on some records | One create span per record without trace context plus one `CLIENT` send with one link per record | One `PRODUCER` send; preserve and link existing record trace context, and inject the send context into other records |
+| Batch, trace context on every record | One `CLIENT` send with one link per record and no create spans | Same |
 
-A propagated context is valid when the configured OpenTelemetry propagator can extract a usable span context from the Kafka headers. For example, when W3C Trace Context propagation is configured, this means a structurally valid `traceparent`. An unsampled context is still valid. Missing, malformed, or null authoritative headers are treated as no context. For duplicate propagation headers, the last matching header is authoritative. Other configured propagators, such as B3, may recognize different headers.
+Record trace context is recognized when the configured OpenTelemetry propagator can extract a usable span context from the Kafka headers. For example, when W3C Trace Context propagation is configured, this means a structurally valid `traceparent`. An unsampled context is still valid. Missing, malformed, or null authoritative headers are treated as no trace context. For duplicate propagation headers, the last matching header is authoritative. Other configured propagators, such as B3, may recognize different headers.
 
-For batches, the send span is always `CLIENT`. It contains one link per record. Each link targets either the record's existing creation context or the generated create span and carries record-specific destination, partition, key, and tombstone attributes when available.
+`PerRecordSpans` follows OpenTelemetry's higher-fidelity recommendation for batch-oriented APIs. Every record without trace context gets a distinct producer span and trace context, and the send span retains record-specific link attributes, at the cost of up to one extra span per record.
+
+`SharedSendSpan` reduces span volume. Records without trace context share the send span's context and do not create producer-side links, so they also lose distinct producer spans and their per-record producer-side attributes. Existing record trace context remains authoritative and is still represented by links.
 
 All producer spans use the ambient current span as their normal parent. A context extracted from record headers is represented by a link rather than used as the send span's parent.
 
@@ -168,13 +177,13 @@ def sendTransactionally(
 
 `produce` injects propagation headers automatically. In normal use, pass records directly to `produce`; do not call `injectHeaders` yourself.
 
-Use `injectHeaders` only when a specific current span should deliberately become the message-creation context before later publication, such as when record construction and publication are decoupled. Explicit injection changes the telemetry when the record does not already have a context.
+Use `injectHeaders` only when a specific current span's trace context should deliberately be written to the record headers before later publication, such as when record construction and publication are decoupled. Explicit injection changes the telemetry when the record does not already have trace context.
 
 If an application span is current, `injectHeaders(record)` followed by `produce(ProducerRecords.one(record))` preserves that application context and creates a linked `CLIENT` send span. Direct `produce(ProducerRecords.one(record))` instead creates a `PRODUCER` send span and injects the send span's own context. Consumers therefore correlate with the application span in the first flow and with the producer send span in the second.
 
-If the record already has a valid context, `injectHeaders` preserves it and both flows have the same topology. If no span context is current during explicit injection, no new usable creation context can be propagated and the subsequent `produce` follows the direct-production behavior.
+If the record already has valid trace context, `injectHeaders` preserves it and both flows have the same topology. If no span context is current during explicit injection, no new usable trace context can be propagated and the subsequent `produce` follows the direct-production behavior.
 
-For a batch, explicitly injecting the same current application context into every record suppresses the per-record create spans: the batch send span links once per record to that shared context. Directly producing an uninstrumented batch creates a distinct create span and propagated context for every record.
+For a batch, explicitly injecting the same current application context into every record suppresses the per-record create spans: the batch send span links once per record to that shared context. With the default `PerRecordSpans` mode, directly producing an uninstrumented batch creates a distinct create span and trace context for every record. With `SharedSendSpan`, direct production instead injects one shared send-span context.
 
 ```scala mdoc:silent
 def prepareRecord(
@@ -328,5 +337,5 @@ def consumePartitioned(
 - Reuse one `KafkaTracer` and one bound traced handle per producer or consumer resource.
 - `commitBatchWithin` remains standard `fs2-kafka`; use it normally after `recordsWithProcessTraced`.
 - Duplicate propagation headers use last-match extraction, matching OpenTelemetry Java Kafka instrumentation rather than the generic first-value propagator rule.
-- `injectHeaders` does not overwrite a recognized existing propagation context. If a record already carries trace headers, those headers continue to define the message creation context.
-- Real batch sends may emit per-record producer `create` spans plus a batch `send` span, with record-specific details attached as links rather than collapsed onto the batch span.
+- `injectHeaders` does not overwrite recognized record trace context. If a record already carries valid trace headers, those headers are preserved.
+- The default `PerRecordSpans` mode may emit one producer `create` span per record plus a batch `send` span. Use `SharedSendSpan` when lower telemetry volume is more important than distinct per-record trace contexts and producer-side details.

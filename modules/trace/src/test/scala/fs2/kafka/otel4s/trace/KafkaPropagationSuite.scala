@@ -116,7 +116,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
     assertEquals(headers.toChain.iterator.count(_.key == "other"), 1)
   }
 
-  test("produce preserves an existing message creation context and links the send span to it") {
+  test("produce preserves existing record trace context and links the send span to it") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -125,7 +125,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
         for {
           producer <- StubKafkaProducer.recorder[String, String]()
           tracedProducer <- testkit.tracedProducer(producer)
-          prepared <- appTracer.rootSpan("upstream-create-context").surround {
+          prepared <- appTracer.rootSpan("upstream-record-context").surround {
             tracedProducer.injectHeaders(ProducerRecord("topic", "key", "value"))
           }
           originalTraceparent = TextMapGetter[Headers]
@@ -146,7 +146,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
               TraceForestExpectation.unordered(
                 root(
                   SpanExpectation
-                    .internal("upstream-create-context")
+                    .internal("upstream-record-context")
                     .scopeName("fs2.kafka.otel4s.tests")
                 ),
                 root(
@@ -159,7 +159,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("injectHeaders preserves an existing message creation context") {
+  test("injectHeaders preserves existing record trace context") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -168,7 +168,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
 
         for {
           tracedProducer <- producerTracer
-          prepared <- testkit.appTracer.rootSpan("upstream-create-context").surround {
+          prepared <- testkit.appTracer.rootSpan("upstream-record-context").surround {
             tracedProducer.injectHeaders(ProducerRecord("topic", "key", "value"))
           }
           originalTraceparent = TextMapGetter[Headers]
@@ -189,7 +189,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("injectHeaders preserves the last matching propagated context when duplicate headers exist") {
+  test("injectHeaders preserves the last matching record trace context when duplicate headers exist") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -242,7 +242,7 @@ final class KafkaPropagationSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("injectHeaders preserves an existing non-W3C creation context recognized by the configured propagator") {
+  test("injectHeaders preserves existing non-W3C record trace context recognized by the configured propagator") {
     KafkaTracerTestkit
       .create(propagators = Seq(CustomTraceContextPropagator))
       .use { testkit =>

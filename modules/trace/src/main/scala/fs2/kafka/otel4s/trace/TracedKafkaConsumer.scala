@@ -219,7 +219,7 @@ object TracedKafkaConsumer {
         clientId.get.flatMap { clientId =>
           val spanContext = Semconv.receiveSpanContext(records, clientId, groupId)
           val spanSetup = config.receiveSpanSetup(spanContext)
-          creationContextLinks(records.toList).flatMap { links =>
+          recordTraceContextLinks(records.toList).flatMap { links =>
             Tracer[F]
               .spanBuilder(spanSetup.spanName)
               .withSpanKind(SpanKind.Client)
@@ -249,7 +249,7 @@ object TracedKafkaConsumer {
       clientId.get.flatMap { clientId =>
         val spanContext = Semconv.processSpanContext(record, clientId, groupId)
         val spanSetup = config.processSpanSetup(spanContext)
-        creationContextLinks(record :: Nil).flatMap { links =>
+        recordTraceContextLinks(record :: Nil).flatMap { links =>
           Tracer[F]
             .spanBuilder(spanSetup.spanName)
             .withSpanKind(SpanKind.Consumer)
@@ -286,7 +286,7 @@ object TracedKafkaConsumer {
         )
         .parJoinUnbounded
 
-    private def creationContextLinks(
+    private def recordTraceContextLinks(
         records: Iterable[ConsumerRecord[K, V]]
     ): F[List[(SpanContext, Attributes)]] =
       records.toList

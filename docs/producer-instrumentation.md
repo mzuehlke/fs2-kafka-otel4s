@@ -1,34 +1,46 @@
 # Producer instrumentation
 
-Producer instrumentation decides which spans to create from two inputs:
+Producer instrumentation decides which spans to create from three inputs:
 
 - the number of records being produced;
-- whether each record already contains a valid propagated message-creation context.
+- whether each record already contains valid trace context in its Kafka headers;
+- the configured `BatchSpanMode`.
 
 ## Span creation matrix
 
-| Case | Spans created | Span kind | Default span name | Links on the send span |
-| --- | --- | --- | --- | --- |
-| Empty records | None | — | — | — |
-| One record without a valid propagated context | One send span | `PRODUCER` | `send <topic>` | None |
-| One record with a valid propagated context | One send span | `CLIENT` | `send <topic>` | One link to the existing context |
-| Batch with no propagated contexts | One create span per record and one send span | Create: `PRODUCER`; send: `CLIENT` | `create <topic>`; `send <topic>` for one topic, otherwise `send` | One link per record, pointing to its create span |
-| Batch where every record has a propagated context | One send span | `CLIENT` | `send <topic>` for one topic, otherwise `send` | One link per record, pointing to its existing context |
-| Batch with a mixture of existing and missing contexts | One create span per missing context and one send span | Create: `PRODUCER`; send: `CLIENT` | As above | Existing records link to their context; missing records link to their generated create span |
-| Batch preparation fails | Only create spans allocated before the failure | `PRODUCER` | `create <topic>` | No send span is created |
-| Transactional produce | The same spans as the corresponding non-transactional produce | Same as above | Same as above | Same as above |
-| `injectHeaders` by itself | None | — | — | — |
+In this document, **record trace context** means valid trace information in a record's Kafka headers that the configured propagator can extract. OpenTelemetry calls this the _message creation context_; the shorter wording emphasizes where the context exists and avoids implying that it must be an active parent span.
 
-For a batch of `N` records where `M` records do not have a valid propagated context, the instrumentation creates:
+| Records and trace headers | `PerRecordSpans` (default) | `SharedSendSpan` |
+| --- | --- | --- |
+| Empty records | No spans | No spans |
+| One record without trace context | One `PRODUCER` `send <topic>`; inject its context; no links | Same |
+| One record with trace context | One `CLIENT` `send <topic>`; preserve and link the context | Same |
+| Batch where no record has trace context | One `PRODUCER` create span per record plus one `CLIENT` send with one link per record | One `PRODUCER` send; inject the same send context into every record; no send links |
+| Batch with trace context on some records | One create span per record without trace context plus one `CLIENT` send with one link per record | One `PRODUCER` send; preserve and link existing record trace context, and inject the send context into other records |
+| Batch with trace context on every record | One `CLIENT` send with one link per record and no create spans | Same |
+| Batch preparation fails | Previously allocated create spans are released; no send span | No create or send span |
+| Transactional produce | The same spans as the corresponding non-transactional produce | Same |
+| `injectHeaders` by itself | No spans | No spans |
+
+For a batch of `N` records where `M` records do not have valid record trace context, `PerRecordSpans` creates:
 
 - `M` create spans;
 - one send span;
 - `N` links on the send span;
 - `M + 1` spans in total.
 
-## Valid propagated contexts
+`SharedSendSpan` creates one send span and no create spans. When `M > 0`, the send span is `PRODUCER`, its context is injected into those `M` records, and it has `N - M` links to preserved record trace contexts. When `M = 0`, it is a `CLIENT` span with `N` links.
 
-A record has a valid propagated context when the configured OpenTelemetry propagator can extract a usable `SpanContext` from its Kafka headers.
+`PerRecordSpans` is the default because it follows OpenTelemetry's higher-fidelity recommendation for batch-oriented APIs. `SharedSendSpan` trades distinct per-record spans, trace contexts, and producer-side details for lower span volume:
+
+```scala
+KafkaTracer.Config.default
+  .withBatchSpanMode(BatchSpanMode.SharedSendSpan)
+```
+
+## Recognized record trace context
+
+A record has recognized trace context when the configured OpenTelemetry propagator can extract a usable `SpanContext` from its Kafka headers.
 
 For example, when W3C Trace Context propagation is configured, this means that the record contains a structurally valid `traceparent`:
 
@@ -36,7 +48,7 @@ For example, when W3C Trace Context propagation is configured, this means that t
 traceparent: 00-80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-01
 ```
 
-A record is treated as not having a valid propagated context when:
+A record is treated as having no trace context when:
 
 - no recognized propagation header exists;
 - `traceparent` is malformed;
@@ -62,7 +74,7 @@ The result is `Some(context)` when extraction establishes a span context and `No
 
 In normal use, pass records directly to `produce`. It automatically injects the appropriate tracing context, so callers generally should not call `injectHeaders` themselves.
 
-Use `injectHeaders` only when a specific current context should deliberately become the message-creation context before later publication, such as when record construction and publication are decoupled. Calling it before `produce` intentionally changes the producer telemetry.
+Use `injectHeaders` only when a specific current context should deliberately be written to the record headers before later publication, such as when record construction and publication are decoupled. Calling it before `produce` intentionally changes the producer telemetry.
 
 Assume that an application span is current while both operations run. For a single record without existing propagation headers, these two flows are different:
 
@@ -78,7 +90,7 @@ creates:
 - a link from the send span to the current application span;
 - message headers containing the application span's context.
 
-The explicit injection makes the application span the record's pre-existing message-creation context. When `produce` subsequently inspects the record, it preserves that context and represents the Kafka send operation separately as a linked `CLIENT` span.
+The explicit injection writes the application span's trace context into the record headers. When `produce` subsequently inspects the record, it preserves that context and represents the Kafka send operation separately as a linked `CLIENT` span.
 
 In contrast, direct production:
 
@@ -92,13 +104,13 @@ creates:
 - no links on that send span;
 - message headers containing the send span's context.
 
-In this flow the instrumentation sees no pre-existing creation context, so the send span itself represents message creation.
+In this flow the instrumentation finds no trace context in the record headers, so it injects the send span's context.
 
 The resulting consumer-side correlation also differs. After explicit injection, consumers correlate with the application span whose context was injected. After direct single-record production, consumers correlate with the producer send span.
 
 The two flows may have the same result when:
 
-- the record already had a valid propagated context, because `injectHeaders` preserves it;
+- the record headers already contained recognized trace context, because `injectHeaders` preserves it;
 - no span context is current while `injectHeaders` runs, because there is no usable current context to propagate.
 
 ### Batch consequences
@@ -109,18 +121,20 @@ The distinction is larger for batches. If `injectHeaders` runs once for every re
 - one `CLIENT` send span;
 - one link per record, with all links targeting the same application-span context but carrying their own record-specific link attributes.
 
-Directly producing the same uninstrumented batch instead creates:
+With `PerRecordSpans`, directly producing the same uninstrumented batch instead creates:
 
 - one distinct `PRODUCER` create span per record;
-- one distinct propagated creation context per record;
+- one distinct propagated trace context per record;
 - one `CLIENT` send span;
 - one link from the send span to each create span.
 
-Use explicit `injectHeaders` only when another specific span is deliberately intended to represent message creation. In all ordinary production flows, use direct `produce` and let the producer instrumentation create and inject the appropriate context.
+With `SharedSendSpan`, direct production creates one `PRODUCER` send span, injects its context into every record, and creates no producer-side links.
+
+Use explicit `injectHeaders` only when another specific span's trace context should deliberately remain associated with the record. In ordinary production flows, use direct `produce` and let the producer instrumentation inject the appropriate context.
 
 ## Single-record sends
 
-### Without an existing creation context
+### Without trace context in the record headers
 
 The instrumentation creates one span:
 
@@ -128,11 +142,11 @@ The instrumentation creates one span:
 - name: `send <topic>`;
 - links: none.
 
-The send span itself represents message creation. Its context is injected into the Kafka record headers before the record is passed to the underlying producer.
+The send span's context is injected into the Kafka record headers before the record is passed to the underlying producer.
 
-This is the only case where a send span has kind `PRODUCER`.
+This is the only case where a send span has kind `PRODUCER` in `PerRecordSpans`. In `SharedSendSpan`, a batch send is also `PRODUCER` whenever at least one record receives its context.
 
-### With an existing creation context
+### With trace context in the record headers
 
 The instrumentation creates one span:
 
@@ -146,9 +160,13 @@ A malformed context is treated as missing. If duplicate propagation headers exis
 
 ## Batch sends
 
-Any send containing more than one record is treated as a batch. Its send span always has kind `CLIENT`.
+Any send containing more than one record is treated as a batch.
 
-For each record without a valid propagated creation context, the instrumentation creates a dedicated span:
+### `PerRecordSpans`
+
+The send span always has kind `CLIENT`.
+
+For each record without valid trace context in its headers, the instrumentation creates a dedicated span:
 
 - kind: `PRODUCER`;
 - name: `create <record-topic>`;
@@ -156,7 +174,13 @@ For each record without a valid propagated creation context, the instrumentation
 
 The create span's context is injected into that record. Records that already contain valid contexts retain their existing propagation headers.
 
-The batch send span contains one link for every record. Each link targets either the record's existing propagated context or its generated create span.
+The batch send span contains one link for every record. Each link targets either the record trace context extracted from its headers or its generated create span.
+
+### `SharedSendSpan`
+
+No create spans are generated. Records with recognized trace context in their headers retain those headers and contribute links to the send span. Other records receive the send span's context and do not contribute self-links.
+
+The send span is `PRODUCER` when its context is injected into at least one record. If every record already has a context, the send span is `CLIENT` and contains one link per record.
 
 ## Link attributes
 
@@ -168,6 +192,8 @@ Every link from a send span describes one produced record and may contain:
 - `messaging.kafka.message.tombstone = true`, when the record value is null.
 
 Links do not contain the producer client ID, messaging operation attributes, Kafka offset, or configured constant attributes.
+
+In `SharedSendSpan`, records that receive the send span's own context do not have producer-side links. Their varying per-record attributes therefore cannot be represented on the batch send span; this is part of the mode's telemetry-volume trade-off.
 
 ## Send-span attributes
 
@@ -181,7 +207,7 @@ Every send span initially contains:
 - `messaging.destination.partition.id`, only when every record has an explicit partition and all records target the same topic-partition;
 - `messaging.batch.message_count`, only when the operation contains more than one record;
 - `messaging.kafka.message.key`, only for a single record with a representable key;
-- `messaging.kafka.message.tombstone = true`, only for a single record with a null value.
+- `messaging.kafka.message.tombstone = true`, when a single record is a tombstone or every record in a batch is a tombstone.
 
 After a successful single-record send completes, its Kafka result contributes:
 
@@ -227,7 +253,7 @@ The send span remains open until the returned await effect is evaluated. Callers
 producer.produce(records).flatten
 ```
 
-Evaluating only `producer.produce(records)` submits the records but leaves successful send-span finalization pending. Generated create spans are released after the outer submission stage completes; they do not remain open while waiting for Kafka acknowledgement.
+Evaluating only `producer.produce(records)` submits the records but leaves successful send-span finalization pending. Generated create spans in `PerRecordSpans` are released after the outer submission stage completes; they do not remain open while waiting for Kafka acknowledgement.
 
 With the default send-span finalization strategy:
 
@@ -240,7 +266,7 @@ With the default send-span finalization strategy:
 
 `withSendSpanSetup` can replace the send span's name, additional attributes, and finalization strategy. It does not change the span kind, link selection, or create spans.
 
-If propagation fails while preparing a batch, all create spans allocated before the failure are released. The send span is not created because batch preparation did not complete.
+If propagation fails while preparing a batch, all create spans allocated before the failure are released. The send span is not created because batch preparation did not complete. `SharedSendSpan` has no create spans to release.
 
 ## Transactional APIs
 

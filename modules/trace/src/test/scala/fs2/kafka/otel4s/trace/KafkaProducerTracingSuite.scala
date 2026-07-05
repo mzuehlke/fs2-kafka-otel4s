@@ -150,7 +150,7 @@ final class KafkaProducerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("batch produce creates per-message creation contexts and links the batch send span") {
+  test("batch produce creates per-record trace contexts and links the batch send span") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -204,6 +204,223 @@ final class KafkaProducerTracingSuite extends KafkaTracingTestSupport {
                       )
                     )
                 )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("batch send emits a span-level tombstone attribute when every record is a tombstone") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        for {
+          producer <- StubKafkaProducer.recorder[String, String]()
+          tracedProducer <- testkit.tracedProducer(producer)
+          records = Chunk(
+            ProducerRecord("topic", "key-a", null.asInstanceOf[String]),
+            ProducerRecord("topic", "key-b", null.asInstanceOf[String])
+          )
+          _ <- tracedProducer.produce(records).flatten
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(SpanExpectation.producer("create topic").scopeName("fs2.kafka")),
+                root(SpanExpectation.producer("create topic").scopeName("fs2.kafka")),
+                root(
+                  SpanExpectation
+                    .client("send topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingKafkaMessageTombstone(true)
+                    )
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("shared-send batch mode uses one producer send context for an uninstrumented batch") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withBatchSpanMode(BatchSpanMode.SharedSendSpan)
+
+        for {
+          producer <- StubKafkaProducer.recorder[String, String]()
+          tracedProducer <- testkit.tracedProducer(producer, config)
+          records = Chunk(
+            ProducerRecord("topic", "key-a", "value-a"),
+            ProducerRecord("topic", "key-b", "value-b"),
+            ProducerRecord("topic", "key-c", "value-c")
+          )
+          _ <- tracedProducer.produce(records).flatten
+          produced <- producer.getCaptured
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            val traceparents = produced.toList.map { record =>
+              TextMapGetter[Headers]
+                .get(record.headers, "traceparent")
+                .getOrElse(fail("missing produced traceparent"))
+            }
+
+            assertEquals(produced.size, 3)
+            assertEquals(traceparents.distinct.size, 1)
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(
+                  SpanExpectation
+                    .producer("send topic")
+                    .scopeName("fs2.kafka")
+                    .linkCount(0)
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("shared-send batch mode preserves record trace context and supplies it to other records") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withBatchSpanMode(BatchSpanMode.SharedSendSpan)
+
+        for {
+          producer <- StubKafkaProducer.recorder[String, String]()
+          tracedProducer <- testkit.tracedProducer(producer, config)
+          existing <- testkit.appTracer.rootSpan("existing-record-context").surround {
+            tracedProducer.injectHeaders(ProducerRecord("topic", "existing", "value"))
+          }
+          existingTraceparent = TextMapGetter[Headers]
+            .get(existing.headers, "traceparent")
+            .getOrElse(fail("missing existing traceparent"))
+          records = Chunk(
+            existing,
+            ProducerRecord("topic", "missing-a", "value"),
+            ProducerRecord("topic", "missing-b", "value")
+          )
+          _ <- tracedProducer.produce(records).flatten
+          produced <- producer.getCaptured
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            val traceparents = produced.toList.map { record =>
+              TextMapGetter[Headers]
+                .get(record.headers, "traceparent")
+                .getOrElse(fail("missing produced traceparent"))
+            }
+
+            assertEquals(traceparents.head, existingTraceparent)
+            assertNotEquals(traceparents(1), existingTraceparent)
+            assertEquals(traceparents(1), traceparents(2))
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(
+                  SpanExpectation
+                    .internal("existing-record-context")
+                    .scopeName("fs2.kafka.otel4s.tests")
+                ),
+                root(
+                  SpanExpectation
+                    .producer("send topic")
+                    .scopeName("fs2.kafka")
+                    .linkCount(1)
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("shared-send batch mode keeps a client send when every record has trace context") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withBatchSpanMode(BatchSpanMode.SharedSendSpan)
+
+        for {
+          producer <- StubKafkaProducer.recorder[String, String]()
+          tracedProducer <- testkit.tracedProducer(producer, config)
+          first <- testkit.appTracer.rootSpan("first-record-context").surround {
+            tracedProducer.injectHeaders(ProducerRecord("topic", "first", "value"))
+          }
+          second <- testkit.appTracer.rootSpan("second-record-context").surround {
+            tracedProducer.injectHeaders(ProducerRecord("topic", "second", "value"))
+          }
+          firstTraceparent = TextMapGetter[Headers]
+            .get(first.headers, "traceparent")
+            .getOrElse(fail("missing first traceparent"))
+          secondTraceparent = TextMapGetter[Headers]
+            .get(second.headers, "traceparent")
+            .getOrElse(fail("missing second traceparent"))
+          _ <- tracedProducer.produce(Chunk(first, second)).flatten
+          produced <- producer.getCaptured
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            val traceparents = produced.toList.map { record =>
+              TextMapGetter[Headers]
+                .get(record.headers, "traceparent")
+                .getOrElse(fail("missing produced traceparent"))
+            }
+
+            assertEquals(traceparents, List(firstTraceparent, secondTraceparent))
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(
+                  SpanExpectation
+                    .internal("first-record-context")
+                    .scopeName("fs2.kafka.otel4s.tests")
+                ),
+                root(
+                  SpanExpectation
+                    .internal("second-record-context")
+                    .scopeName("fs2.kafka.otel4s.tests")
+                ),
+                root(
+                  SpanExpectation
+                    .client("send topic")
+                    .scopeName("fs2.kafka")
+                    .linkCount(2)
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("single-record sends are unchanged in shared-send batch mode") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withBatchSpanMode(BatchSpanMode.SharedSendSpan)
+
+        for {
+          producer <- StubKafkaProducer.recorder[String, String]()
+          tracedProducer <- testkit.tracedProducer(producer, config)
+          _ <- tracedProducer
+            .produce(ProducerRecords.one(ProducerRecord("topic", "key", "value")))
+            .flatten
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(SpanExpectation.producer("send topic").scopeName("fs2.kafka"))
               )
             )
           }

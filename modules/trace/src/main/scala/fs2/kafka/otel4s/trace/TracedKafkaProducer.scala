@@ -35,13 +35,13 @@ import scala.util.chaining._
 /** A tracing handle bound to a specific [[fs2.kafka.KafkaProducer]].
   *
   * This handle keeps producer-specific tracing helpers explicit while still implementing [[fs2.kafka.KafkaProducer]].
-  * The traced `produce` implementation preserves fs2-kafka's original two-stage contract and models message creation
-  * separately from the Kafka client send operation when necessary.
+  * The traced `produce` implementation preserves fs2-kafka's original two-stage contract and can create per-record
+  * producer spans separately from the Kafka client send operation.
   *
-  * A single record without an existing propagated creation context uses one `PRODUCER` `send` span and propagates that
-  * span's context. A single record with an existing context uses a linked `CLIENT` `send` span instead. A batch always
-  * uses a `CLIENT` `send` span; records without existing contexts receive individual `PRODUCER` `create` spans, and the
-  * send span links to one creation context per record.
+  * A single record without recognized trace context in its headers uses one `PRODUCER` `send` span and propagates that
+  * span's context. A single record with trace context in its headers uses a linked `CLIENT` `send` span instead. For
+  * batches, [[BatchSpanMode]] controls whether records without trace context receive individual `PRODUCER` `create`
+  * spans or share the batch `send` span's context.
   *
   * To ensure emitted `send` spans are finalized, callers should evaluate the returned await effect, for example via
   * `producer.produce(records).flatten`.
@@ -56,11 +56,11 @@ trait TracedKafkaProducer[F[_], K, V] extends KafkaProducer.WithSettings[F, K, V
     * When duplicate Kafka headers exist for the same propagation key, the last matching header determines the extracted
     * context. Missing, malformed, or null authoritative values are treated as no context.
     *
-    * If the record already carries a recognized context, it is preserved as-is. Otherwise the current span context is
-    * propagated when one exists. This method does not create a span.
+    * If the record headers already contain recognized trace context, they are preserved as-is. Otherwise the current
+    * span context is propagated when one exists. This method does not create a span.
     *
     * Most callers should not call this method before [[produce]], because `produce` automatically injects the
-    * appropriate context. Use it only when a specific current context should deliberately become the message-creation
+    * appropriate context. Use it only when a specific current context should deliberately become the record trace
     * context before later publication. Doing so intentionally affects span topology: producing the injected record
     * creates a `CLIENT` send span linked to that context, whereas producing the same record directly creates a
     * `PRODUCER` send span and injects the send span's context.
@@ -71,28 +71,31 @@ trait TracedKafkaProducer[F[_], K, V] extends KafkaProducer.WithSettings[F, K, V
     * spans.
     *
     * Most callers should pass the batch directly to [[produce]], which automatically injects an appropriate context for
-    * every record. Use this method only when a specific current context should deliberately become the creation context
-    * before later publication.
+    * every record. Use this method only when a specific current context should deliberately become the record trace
+    * context before later publication.
     *
-    * Existing recognized contexts are preserved independently for each record. Records without one receive the current
-    * span context when it exists. Injecting the same current application context into an otherwise uninstrumented batch
-    * means the later batch send links once per record to that shared context and does not synthesize per-record
-    * `create` spans. Directly producing that batch would synthesize a distinct creation span and context for every
-    * record.
+    * Recognized trace context in the record headers is preserved independently for each record. Other records receive
+    * the current span context when one exists. Injecting the same current application context into an otherwise
+    * uninstrumented batch means the later batch send links once per record to that shared context and does not
+    * synthesize per-record `create` spans. Directly producing that batch in [[BatchSpanMode.PerRecordSpans]] would
+    * synthesize a distinct span and trace context for every record without one.
     */
   def injectHeaders(records: ProducerRecords[K, V]): F[ProducerRecords[K, V]]
 
-  /** Produces records using fs2-kafka's two-stage contract and traces message creation and sending.
+  /** Produces records using fs2-kafka's two-stage contract and traces record preparation and sending.
     *
-    * Span creation follows these rules:
+    * Producer spans follow these rules:
     *
     *   - empty input delegates to the underlying producer and creates no spans;
-    *   - one record without a recognized propagated context creates one `PRODUCER` `send <topic>` span, with no links,
-    *     and injects that span's context into the record;
-    *   - one record with a recognized context creates one `CLIENT` `send <topic>` span linked to that context and
-    *     preserves the record headers;
-    *   - a batch creates one `CLIENT` send span with one link per record. Each missing creation context is supplied by
-    *     a generated `PRODUCER` `create <topic>` span, while existing contexts are preserved and linked directly.
+    *   - one record without recognized trace context in its headers creates one `PRODUCER` `send <topic>` span, with no
+    *     links, and injects that span's context into the record;
+    *   - one record with recognized trace context in its headers creates one `CLIENT` `send <topic>` span linked to
+    *     that context and preserves the record headers;
+    *   - in [[BatchSpanMode.PerRecordSpans]], a batch creates one `CLIENT` send span with one link per record. Each
+    *     record without trace context gets a generated `PRODUCER` `create <topic>` span;
+    *   - in [[BatchSpanMode.SharedSendSpan]], no `create` spans are generated. Trace context already present in record
+    *     headers is preserved and linked, while other records receive the send span's context. The send span is
+    *     `PRODUCER` when its context is used by at least one record, otherwise `CLIENT`.
     *
     * The ambient current span remains the normal parent of producer spans. Contexts extracted from record headers are
     * represented as links rather than selected as parents.
@@ -189,7 +192,7 @@ object TracedKafkaProducer {
               span.resource.allocatedCase
                 .flatMap { case (res, release) =>
                   val outerProduce =
-                    if (prepared.sendKind == SpanKind.Producer)
+                    if (prepared.injectSendSpanContext)
                       prepared.records
                         .traverse(record => injectHeaders(record))
                         .flatMap(record => underlying.produce(record))
@@ -318,30 +321,29 @@ object TracedKafkaProducer {
         config
       )
 
-    /** @param usesSendSpanAsCreationContext - whether this record relies on the eventual `send` span to represent message
-      * creation.
+    /** @param needsSendSpanContextInjection - whether this record needs the eventual `send` span's trace context injected.
       *
-      * `true` means the record has no pre-existing creation context and no dedicated `create` span was synthesized, so
-      * the batch `send` span itself is the creation context for this record.
+      * `true` means the record has no recognized trace context and no dedicated `create` span was synthesized.
       *
-      * `false` means the record already has its own creation context, either from propagated headers already on the
-      * record or from a synthesized `create` span during batch preparation.
+      * `false` means the record headers already contain trace context, either from the caller or from a synthesized
+      * `create` span during batch preparation.
       */
     private case class PreparedRecord(
         record: ProducerRecord[K, V],
-        usesSendSpanAsCreationContext: Boolean,
+        needsSendSpanContextInjection: Boolean,
         sendLink: Option[(SpanContext, Attributes)]
     )
 
     private case class PreparedBatch(
         records: ProducerRecords[K, V],
         sendKind: SpanKind,
-        sendLinks: List[(SpanContext, Attributes)]
+        sendLinks: List[(SpanContext, Attributes)],
+        injectSendSpanContext: Boolean
     )
 
     private def prepareRecord(
         record: ProducerRecord[K, V],
-        createCreationContext: Boolean,
+        createRecordSpan: Boolean,
         clientId: Option[String]
     ): Resource[F, PreparedRecord] =
       Resource
@@ -351,12 +353,12 @@ object TracedKafkaProducer {
             Resource.pure(
               PreparedRecord(
                 record = record,
-                usesSendSpanAsCreationContext = false,
+                needsSendSpanContextInjection = false,
                 sendLink = Some(ctx -> Semconv.sendLinkAttributes(record))
               )
             )
 
-          case None if createCreationContext =>
+          case None if createRecordSpan =>
             Tracer[F]
               .spanBuilder(Semconv.createSpanName(record.topic))
               .withSpanKind(SpanKind.Producer)
@@ -371,7 +373,7 @@ object TracedKafkaProducer {
                   .map { injected =>
                     PreparedRecord(
                       record = injected,
-                      usesSendSpanAsCreationContext = false,
+                      needsSendSpanContextInjection = false,
                       sendLink = Some(res.span.context -> Semconv.sendLinkAttributes(record))
                     )
                   }
@@ -381,7 +383,7 @@ object TracedKafkaProducer {
             Resource.pure(
               PreparedRecord(
                 record = record,
-                usesSendSpanAsCreationContext = true,
+                needsSendSpanContextInjection = true,
                 sendLink = None
               )
             )
@@ -391,17 +393,19 @@ object TracedKafkaProducer {
         records: ProducerRecords[K, V],
         clientId: Option[String]
     ): Resource[F, PreparedBatch] = {
-      val useCreateSpans = records.size > 1
+      val useCreateSpans =
+        records.size > 1 && config.batchSpanMode == BatchSpanMode.PerRecordSpans
 
       records.toList
         .traverse(prepareRecord(_, useCreateSpans, clientId))
         .map { prepared =>
-          val sendUsesOwnContext = prepared.forall(_.usesSendSpanAsCreationContext)
+          val injectSendSpanContext = prepared.exists(_.needsSendSpanContextInjection)
 
           PreparedBatch(
             records = ProducerRecords(prepared.map(_.record)),
-            sendKind = if (sendUsesOwnContext) SpanKind.Producer else SpanKind.Client,
-            sendLinks = prepared.flatMap(_.sendLink)
+            sendKind = if (injectSendSpanContext) SpanKind.Producer else SpanKind.Client,
+            sendLinks = prepared.flatMap(_.sendLink),
+            injectSendSpanContext = injectSendSpanContext
           )
         }
     }
