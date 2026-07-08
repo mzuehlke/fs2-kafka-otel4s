@@ -222,6 +222,7 @@ object TracedKafkaConsumer {
           recordTraceContextLinks(records.toList).flatMap { links =>
             Tracer[F]
               .spanBuilder(spanSetup.spanName)
+              .root
               .withSpanKind(SpanKind.Client)
               .withFinalizationStrategy(spanSetup.finalizationStrategy)
               .addAttributes(
@@ -252,6 +253,7 @@ object TracedKafkaConsumer {
         recordTraceContextLinks(record :: Nil).flatMap { links =>
           Tracer[F]
             .spanBuilder(spanSetup.spanName)
+            .root
             .withSpanKind(SpanKind.Consumer)
             .withFinalizationStrategy(spanSetup.finalizationStrategy)
             .addAttributes(

@@ -172,6 +172,48 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
+  test("receive and process spans do not inherit ambient context") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        import testkit.appTracer
+
+        for {
+          consumerTracer <- testkit.tracedConsumer[String, String](
+            StubKafkaConsumer.metadataOnly("consumer-client", "consumer-group")
+          )
+          record = ConsumerRecord("topic", 0, 42L, "key", "value")
+          _ <- Tracer[IO]
+            .rootSpan("ambient-context")
+            .surround {
+              consumerTracer.receive(Chunk.singleton(record))(IO.unit) >>
+                consumerTracer.process(record)(IO.unit)
+            }
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(SpanExpectation.internal("ambient-context").scopeName("fs2.kafka.otel4s.tests")),
+                root(
+                  SpanExpectation
+                    .client("poll topic")
+                    .scopeName("fs2.kafka")
+                    .noParentSpanContext
+                ),
+                root(
+                  SpanExpectation
+                    .consumer("process topic")
+                    .scopeName("fs2.kafka")
+                    .noParentSpanContext
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
   test("process links record trace context and emits a process span") {
     KafkaTracerTestkit
       .create()
