@@ -76,6 +76,7 @@ object KafkaTracer {
     private[otel4s] def sendSpanSetup: SendSpanContext => Config.SpanSetup
     private[otel4s] def receiveSpanSetup: ReceiveSpanContext => Config.SpanSetup
     private[otel4s] def processSpanSetup: ProcessSpanContext => Config.SpanSetup
+    private[otel4s] def commitSpanSetup: CommitSpanContext => Config.SpanSetup
 
     /** Replaces the constant attributes attached to every span emitted by this library.
       *
@@ -115,6 +116,10 @@ object KafkaTracer {
       */
     def withProcessSpanSetup(f: ProcessSpanContext => Config.SpanSetup): Config
 
+    /** Replaces the function used to derive consumer-side `commit` / `settle` span setup from committed chunk metadata.
+      */
+    def withCommitSpanSetup(f: CommitSpanContext => Config.SpanSetup): Config
+
     /** Adds `server.address` and, when provided, `server.port` to emitted spans.
       *
       * Use values derived from the logical Kafka broker or service address, not connection-level peer information.
@@ -143,6 +148,9 @@ object KafkaTracer {
 
       val processSpanSetup: ProcessSpanContext => SpanSetup =
         ctx => SpanSetup("process", Some(ctx.topic))
+
+      val commitSpanSetup: CommitSpanContext => SpanSetup =
+        ctx => SpanSetup("commit", Option.when(ctx.topics.size == 1)(ctx.topics.head))
 
       val spanFinalizationStrategy: SpanFinalizer.Strategy = {
         case Resource.ExitCase.Errored(e) =>
@@ -214,6 +222,7 @@ object KafkaTracer {
         sendSpanSetup = Defaults.sendSpanSetup,
         receiveSpanSetup = Defaults.receiveSpanSetup,
         processSpanSetup = Defaults.processSpanSetup,
+        commitSpanSetup = Defaults.commitSpanSetup,
       )
 
     final private case class ConfigImpl(
@@ -223,6 +232,7 @@ object KafkaTracer {
         sendSpanSetup: SendSpanContext => Config.SpanSetup,
         receiveSpanSetup: ReceiveSpanContext => Config.SpanSetup,
         processSpanSetup: ProcessSpanContext => Config.SpanSetup,
+        commitSpanSetup: CommitSpanContext => Config.SpanSetup,
     ) extends Config {
 
       override def withConstAttributes(attributes: Attributes): Config =
@@ -242,6 +252,9 @@ object KafkaTracer {
 
       override def withProcessSpanSetup(f: ProcessSpanContext => Config.SpanSetup): Config =
         copy(processSpanSetup = f)
+
+      override def withCommitSpanSetup(f: CommitSpanContext => Config.SpanSetup): Config =
+        copy(commitSpanSetup = f)
 
       override def withServerAddress(serverAddress: String, serverPort: Option[Int]): Config =
         copy(

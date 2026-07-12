@@ -20,6 +20,7 @@ import cats.effect.{IO, Ref}
 import fs2.Chunk
 import fs2.kafka._
 import fs2.kafka.consumer.KafkaConsumeChunk.CommitNow
+import org.typelevel.otel4s.Attributes
 import org.typelevel.otel4s.oteljava.testkit.trace._
 import org.typelevel.otel4s.semconv.experimental.attributes.MessagingExperimentalAttributes
 import org.typelevel.otel4s.trace.Tracer
@@ -54,7 +55,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("consumeChunkTraceReceive traces chunk delivery, invokes the processor, and commits offsets") {
+  test("consumeChunkTraceReceive traces chunk delivery, invokes the processor, and traces commit") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -95,6 +96,22 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
                       MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
                       MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
                     )
+                ),
+                root(
+                  SpanExpectation
+                    .client("commit topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingSystem(
+                        MessagingExperimentalAttributes.MessagingSystemValue.Kafka
+                      ),
+                      MessagingExperimentalAttributes.MessagingDestinationName("topic"),
+                      MessagingExperimentalAttributes.MessagingDestinationPartitionId("0"),
+                      MessagingExperimentalAttributes.MessagingOperationName("commit"),
+                      MessagingExperimentalAttributes.MessagingOperationType("settle"),
+                      MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
+                      MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
+                    )
                 )
               )
             )
@@ -103,7 +120,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("consumeChunkTraceProcess traces each processed record, and commits offsets") {
+  test("consumeChunkTraceProcess traces each processed record and commit") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -163,6 +180,68 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
                       MessagingExperimentalAttributes.MessagingOperationType("process"),
                       MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
                       MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group")
+                    )
+                ),
+                root(
+                  SpanExpectation
+                    .client("commit topic")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingSystem(
+                        MessagingExperimentalAttributes.MessagingSystemValue.Kafka
+                      ),
+                      MessagingExperimentalAttributes.MessagingDestinationName("topic"),
+                      MessagingExperimentalAttributes.MessagingDestinationPartitionId("0"),
+                      MessagingExperimentalAttributes.MessagingOperationName("commit"),
+                      MessagingExperimentalAttributes.MessagingOperationType("settle"),
+                      MessagingExperimentalAttributes.MessagingClientId("consumer-client"),
+                      MessagingExperimentalAttributes.MessagingConsumerGroupName("consumer-group"),
+                      MessagingExperimentalAttributes.MessagingBatchMessageCount(2L)
+                    )
+                )
+              )
+            )
+          }
+        } yield ()
+      }
+  }
+
+  test("custom commit span setup overrides span name and attributes") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withCommitSpanSetup { ctx =>
+            KafkaTracer.Config.SpanSetup(
+              spanName = s"finish ${ctx.topics.headOption.getOrElse("unknown")} ${ctx.recordCount}",
+              attributes = Attributes(
+                MessagingExperimentalAttributes.MessagingOperationName("finish")
+              ),
+              finalizationStrategy = KafkaTracer.Config.Defaults.spanFinalizationStrategy
+            )
+          }
+
+        for {
+          commits <- Ref[IO].of(0)
+          record = ConsumerRecord("topic", 0, 1L, "k", "v")
+          consumer = StubKafkaConsumer.streaming(
+            List(committableRecord(record, commits))
+          )
+          traced <- testkit.tracedConsumer[String, String](consumer, config)
+          _ <- traced.consumeChunkTraceReceive(_ => IO.pure(CommitNow)).attempt
+          spans <- testkit.finishedSpans
+          _ <- IO {
+            assertExpected(
+              spans,
+              TraceForestExpectation.unordered(
+                root(SpanExpectation.client("poll topic").scopeName("fs2.kafka")),
+                root(
+                  SpanExpectation
+                    .client("finish topic 1")
+                    .scopeName("fs2.kafka")
+                    .attributesSubset(
+                      MessagingExperimentalAttributes.MessagingOperationName("finish"),
+                      MessagingExperimentalAttributes.MessagingOperationType("settle")
                     )
                 )
               )

@@ -180,9 +180,9 @@ object TracedKafkaConsumer {
         chunkProcessor: Chunk[ConsumerRecord[K, V]] => F[CommitNow]
     ): F[Nothing] = {
       def handleChunk(chunk: Chunk[CommittableConsumerRecord[F, K, V]]): F[Unit] = {
-        val (offsets, _) = offsetsAndRecords(chunk)
+        val (offsets, records) = offsetsAndRecords(chunk)
 
-        receiveCommittable(chunk)(chunkProcessor(chunk.map(_.record))) >> offsets.commit
+        receiveCommittable(chunk)(chunkProcessor(records)) >> commit(records)(offsets.commit)
       }
 
       handleChunkImpl(handleChunk)
@@ -192,7 +192,7 @@ object TracedKafkaConsumer {
       def handleChunk(chunk: Chunk[CommittableConsumerRecord[F, K, V]]): F[Unit] = {
         val (offsets, records) = offsetsAndRecords(chunk)
 
-        records.traverseVoid(record => process(record)(recordProcessor(record))) >> offsets.commit
+        records.traverseVoid(record => process(record)(recordProcessor(record))) >> commit(records)(offsets.commit)
       }
 
       handleChunkImpl(handleChunk)
@@ -271,6 +271,26 @@ object TracedKafkaConsumer {
 
     override def process[A](record: CommittableConsumerRecord[F, K, V])(fa: F[A]): F[A] =
       process(record.record)(fa)
+
+    private def commit[A](records: Chunk[ConsumerRecord[K, V]])(fa: F[A]): F[A] =
+      if (records.isEmpty) fa
+      else
+        clientId.get.flatMap { clientId =>
+          val spanContext = Semconv.commitSpanContext(records, clientId, groupId)
+          val spanSetup = config.commitSpanSetup(spanContext)
+
+          Tracer[F]
+            .spanBuilder(spanSetup.spanName)
+            .withSpanKind(SpanKind.Client)
+            .withFinalizationStrategy(spanSetup.finalizationStrategy)
+            .addAttributes(
+              Semconv.commitAttributes(spanContext, records) ++
+                config.constAttributes ++
+                spanSetup.attributes
+            )
+            .build
+            .surround(fa)
+        }
 
     override def recordsWithProcess[A](
         f: CommittableConsumerRecord[F, K, V] => F[A]
