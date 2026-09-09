@@ -121,6 +121,21 @@ private[otel4s] object Semconv {
       groupId = groupId
     )
 
+  def commitSpanContext[K: KafkaMessageKey, V](
+      records: Chunk[ConsumerRecord[K, V]],
+      clientId: Option[String],
+      groupId: Option[String]
+  ): CommitSpanContext =
+    CommitSpanContext(
+      topics = records.iterator.map(_.topic).toSet,
+      partitions = records.iterator.map(_.partition).toSet,
+      recordCount = records.size,
+      messageKey = consumerSingleRecordMessageKey(records),
+      offset = consumerSingleRecordOffset(records),
+      clientId = clientId,
+      groupId = groupId
+    )
+
   def createSpanName(topic: String): String =
     s"create $topic"
 
@@ -199,6 +214,29 @@ private[otel4s] object Semconv {
     builder.addAll(Keys.KafkaMessageKey.maybe(ctx.messageKey))
     builder.addAll(Keys.KafkaMessageTombstone.maybe(tombstoneAttribute(record.value)))
     builder.addOne(Keys.KafkaOffset(ctx.offset))
+
+    builder.result()
+  }
+
+  def commitAttributes[K, V](
+      ctx: CommitSpanContext,
+      records: Chunk[ConsumerRecord[K, V]]
+  ): Attributes = {
+    val builder = baseBuilder(
+      operationName = "commit",
+      operationType = "settle",
+      topic = singleton(ctx.topics),
+      clientId = ctx.clientId,
+      consumerGroupName = ctx.groupId
+    )
+
+    builder.addAll(
+      Keys.DestinationPartitionId.maybe(consumerSingleLogicalPartition(records).map(_.toString))
+    )
+    builder.addAll(Keys.KafkaMessageKey.maybe(ctx.messageKey))
+    builder.addAll(Keys.KafkaMessageTombstone.maybe(consumerSingleRecordTombstone(records)))
+    builder.addAll(Keys.KafkaOffset.maybe(ctx.offset))
+    builder.addAll(Keys.BatchMessageCount.maybe(Option.when(ctx.recordCount > 1)(ctx.recordCount)))
 
     builder.result()
   }
