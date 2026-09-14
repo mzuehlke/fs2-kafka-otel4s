@@ -219,24 +219,26 @@ object TracedKafkaConsumer {
         clientId.get.flatMap { clientId =>
           val spanContext = Semconv.receiveSpanContext(records, clientId, groupId)
           val spanSetup = config.receiveSpanSetup(spanContext)
-          recordTraceContextLinks(records.toList).flatMap { links =>
-            Tracer[F]
-              .spanBuilder(spanSetup.spanName)
-              .root
-              .withSpanKind(SpanKind.Client)
-              .withFinalizationStrategy(spanSetup.finalizationStrategy)
-              .addAttributes(
-                Semconv.receiveAttributes(spanContext, records) ++
-                  config.constAttributes ++
-                  spanSetup.attributes
-              )
-              .pipe { builder =>
-                links.foldLeft(builder) { case (acc, (ctx, attributes)) =>
-                  acc.addLink(ctx, attributes)
+          spanSetup.fold(fa) { setup =>
+            recordTraceContextLinks(records.toList).flatMap { links =>
+              Tracer[F]
+                .spanBuilder(setup.spanName)
+                .root
+                .withSpanKind(SpanKind.Client)
+                .withFinalizationStrategy(setup.finalizationStrategy)
+                .addAttributes(
+                  Semconv.receiveAttributes(spanContext, records) ++
+                    config.constAttributes ++
+                    setup.attributes
+                )
+                .pipe { builder =>
+                  links.foldLeft(builder) { case (acc, (ctx, attributes)) =>
+                    acc.addLink(ctx, attributes)
+                  }
                 }
-              }
-              .build
-              .surround(fa)
+                .build
+                .surround(fa)
+            }
           }
         }
       }
@@ -250,24 +252,26 @@ object TracedKafkaConsumer {
       clientId.get.flatMap { clientId =>
         val spanContext = Semconv.processSpanContext(record, clientId, groupId)
         val spanSetup = config.processSpanSetup(spanContext)
-        recordTraceContextLinks(record :: Nil).flatMap { links =>
-          Tracer[F]
-            .spanBuilder(spanSetup.spanName)
-            .root
-            .withSpanKind(SpanKind.Consumer)
-            .withFinalizationStrategy(spanSetup.finalizationStrategy)
-            .addAttributes(
-              Semconv.processAttributes(spanContext, record) ++
-                config.constAttributes ++
-                spanSetup.attributes
-            )
-            .pipe { builder =>
-              links.foldLeft(builder) { case (acc, (ctx, attributes)) =>
-                acc.addLink(ctx, attributes)
+        spanSetup.fold(fa) { setup =>
+          recordTraceContextLinks(record :: Nil).flatMap { links =>
+            Tracer[F]
+              .spanBuilder(setup.spanName)
+              .root
+              .withSpanKind(SpanKind.Consumer)
+              .withFinalizationStrategy(setup.finalizationStrategy)
+              .addAttributes(
+                Semconv.processAttributes(spanContext, record) ++
+                  config.constAttributes ++
+                  setup.attributes
+              )
+              .pipe { builder =>
+                links.foldLeft(builder) { case (acc, (ctx, attributes)) =>
+                  acc.addLink(ctx, attributes)
+                }
               }
-            }
-            .build
-            .surround(fa)
+              .build
+              .surround(fa)
+          }
         }
       }
 
@@ -281,17 +285,19 @@ object TracedKafkaConsumer {
           val spanContext = Semconv.commitSpanContext(records, clientId, groupId)
           val spanSetup = config.commitSpanSetup(spanContext)
 
-          Tracer[F]
-            .spanBuilder(spanSetup.spanName)
-            .withSpanKind(SpanKind.Client)
-            .withFinalizationStrategy(spanSetup.finalizationStrategy)
-            .addAttributes(
-              Semconv.commitAttributes(spanContext, records) ++
-                config.constAttributes ++
-                spanSetup.attributes
-            )
-            .build
-            .surround(fa)
+          spanSetup.fold(fa) { setup =>
+            Tracer[F]
+              .spanBuilder(setup.spanName)
+              .withSpanKind(SpanKind.Client)
+              .withFinalizationStrategy(setup.finalizationStrategy)
+              .addAttributes(
+                Semconv.commitAttributes(spanContext, records) ++
+                  config.constAttributes ++
+                  setup.attributes
+              )
+              .build
+              .surround(fa)
+          }
         }
 
     override def recordsWithProcess[A](

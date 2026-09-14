@@ -212,12 +212,14 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       .use { testkit =>
         val config =
           KafkaTracer.Config.default.withCommitSpanSetup { ctx =>
-            KafkaTracer.Config.SpanSetup(
-              spanName = s"finish ${ctx.topics.headOption.getOrElse("unknown")} ${ctx.recordCount}",
-              attributes = Attributes(
-                MessagingExperimentalAttributes.MessagingOperationName("finish")
-              ),
-              finalizationStrategy = KafkaTracer.Config.Defaults.spanFinalizationStrategy
+            Some(
+              KafkaTracer.Config.SpanSetup.Commit(
+                spanName = s"finish ${ctx.topics.headOption.getOrElse("unknown")} ${ctx.recordCount}",
+                attributes = Attributes(
+                  MessagingExperimentalAttributes.MessagingOperationName("finish")
+                ),
+                finalizationStrategy = KafkaTracer.Config.Defaults.spanFinalizationStrategy
+              )
             )
           }
 
@@ -357,6 +359,31 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
             )
           }
         } yield ()
+      }
+  }
+
+  test("disabled consumer spans still process and commit records") {
+    KafkaTracerTestkit
+      .create()
+      .use { testkit =>
+        val config =
+          KafkaTracer.Config.default.withoutReceiveSpans.withoutProcessSpans.withoutCommitSpans
+
+        for {
+          processed <- Ref[IO].of(List.empty[ConsumerRecord[String, String]])
+          commits <- Ref[IO].of(0)
+          record = ConsumerRecord("topic", 0, 1L, "key", "value")
+          consumer = StubKafkaConsumer.streaming(List(committableRecord(record, commits)))
+          traced <- testkit.tracedConsumer[String, String](consumer, config)
+          _ <- traced.consumeChunkTraceProcess(record => processed.update(_ :+ record)).attempt
+          seen <- processed.get
+          commitCount <- commits.get
+          spans <- testkit.finishedSpans
+        } yield {
+          assertEquals(seen, List(record))
+          assertEquals(commitCount, 1)
+          assertEquals(spans, Nil)
+        }
       }
   }
 
