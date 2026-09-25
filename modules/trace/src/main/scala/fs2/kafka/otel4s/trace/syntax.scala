@@ -176,7 +176,7 @@ trait TracedKafkaConsumerStreamTracingSyntax {
       *
       * This helper keeps raw `consumeChunk` available on `Stream[TracedKafkaConsumer[...]]`. It delegates to
       * [[TracedKafkaConsumer.consumeChunk]], so it does not add tracing by itself. Use [[consumeChunkTraced]] or
-      * [[consumeRecordsTraced]] when you want `receive`, per-record `process`, and owned `commit` tracing.
+      * [[consumeRecordTraced]] when you want `receive`, per-record `process`, and owned `commit` tracing.
       *
       * Is shorthand for:
       *
@@ -209,13 +209,13 @@ trait TracedKafkaConsumerStreamTracingSyntax {
       * Is shorthand for:
       *
       * {{{
-      * tracedConsumers.evalMap(_.consumeRecordsTraced(recordProcessor)).compile.onlyOrError
+      * tracedConsumers.evalMap(_.consumeRecordTraced(recordProcessor)).compile.onlyOrError
       * }}}
       */
-    def consumeRecordsTraced[A](
+    def consumeRecordTraced[A](
         recordProcessor: ConsumerRecord[K, V] => F[A]
     )(implicit F: Concurrent[F]): F[Nothing] =
-      self.evalMap(_.consumeRecordsTraced(recordProcessor)).compile.onlyOrError
+      self.evalMap(_.consumeRecordTraced(recordProcessor)).compile.onlyOrError
 
     /** Convenience stream for the common traced-consumption shape: a chunk-level `receive` span around delivery, plus a
       * per-record `process` span for each record in that chunk.

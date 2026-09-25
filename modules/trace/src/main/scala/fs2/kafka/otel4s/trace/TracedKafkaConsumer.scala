@@ -70,7 +70,7 @@ trait TracedKafkaConsumer[F[_], K, V] {
   /** Delegates to `underlying.consumeChunk` without adding tracing.
     *
     * This passthrough keeps raw chunk-oriented `fs2-kafka` code available on the traced handle. Use
-    * [[consumeChunkTraced]] or [[consumeRecordsTraced]] when you want `receive`, per-record `process`, and owned
+    * [[consumeChunkTraced]] or [[consumeRecordTraced]] when you want `receive`, per-record `process`, and owned
     * `commit` tracing.
     */
   final def consumeChunk(
@@ -103,7 +103,7 @@ trait TracedKafkaConsumer[F[_], K, V] {
     * [[KafkaTracer.Config.withoutCommitSpans]] to suppress individual spans without changing consumption or commit
     * behavior.
     */
-  def consumeRecordsTraced[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing]
+  def consumeRecordTraced[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing]
 
   /** Evaluates `fa` inside a `poll` / `receive` span representing delivery of a non-committable chunk of records to
     * application code.
@@ -199,7 +199,7 @@ object TracedKafkaConsumer {
       handleChunkImpl(handleChunk)
     }
 
-    override def consumeRecordsTraced[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing] = {
+    override def consumeRecordTraced[A](recordProcessor: ConsumerRecord[K, V] => F[A]): F[Nothing] = {
       def handleChunk(chunk: Chunk[CommittableConsumerRecord[F, K, V]]): F[Unit] = {
         val (offsets, records) = offsetsAndRecords(chunk)
 

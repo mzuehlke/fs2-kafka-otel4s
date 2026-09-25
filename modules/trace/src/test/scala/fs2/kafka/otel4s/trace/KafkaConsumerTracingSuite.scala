@@ -181,7 +181,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
       }
   }
 
-  test("consumeRecordsTraced traces delivery, each processed record, and commit") {
+  test("consumeRecordTraced traces delivery, each processed record, and commit") {
     KafkaTracerTestkit
       .create()
       .use { testkit =>
@@ -200,7 +200,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
           )
           traced <- testkit.tracedConsumer[String, String](consumer)
           _ <- traced
-            .consumeRecordsTraced(record => processed.update(_ :+ record))
+            .consumeRecordTraced(record => processed.update(_ :+ record))
             .attempt
           seen <- processed.get
           commitCount <- commits.get
@@ -449,7 +449,7 @@ final class KafkaConsumerTracingSuite extends KafkaTracingTestSupport {
           consumer = StubKafkaConsumer.streaming(List(committableRecord(record, commits)))
           traced <- testkit.tracedConsumer[String, String](consumer, config)
           _ <- traced
-            .consumeRecordsTraced(record => processed.update(_ :+ record))
+            .consumeRecordTraced(record => processed.update(_ :+ record))
             .attempt
           seen <- processed.get
           commitCount <- commits.get

@@ -129,14 +129,14 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
     } yield assertEquals(seen, Some(Chunk.singleton(record)))
   }
 
-  test("Stream[TracedKafkaConsumer].consumeRecordsTraced delegates to traced consumeRecordsTraced") {
+  test("Stream[TracedKafkaConsumer].consumeRecordTraced delegates to traced consumeRecordTraced") {
     for {
       probe <- ConsumerSyntaxProbe.create()
       _ <- Stream
         .emit(probe)
-        .consumeRecordsTraced(_ => IO.unit)
+        .consumeRecordTraced(_ => IO.unit)
         .attempt
-      seen <- probe.consumeRecordsTracedCalled.get
+      seen <- probe.consumeRecordTracedCalled.get
     } yield assertEquals(seen, true)
   }
 
@@ -164,7 +164,7 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
       val processedRecord: Ref[IO, Option[ConsumerRecord[String, String]]],
       val processedCommittable: Ref[IO, Option[CommittableConsumerRecord[IO, String, String]]],
       val consumeChunkTracedChunkCalled: Ref[IO, Boolean],
-      val consumeRecordsTracedCalled: Ref[IO, Boolean],
+      val consumeRecordTracedCalled: Ref[IO, Boolean],
       val recordsTracedCalled: Ref[IO, Boolean],
       recordsTracedResult: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.empty
   ) extends TracedKafkaConsumer[IO, String, String] {
@@ -174,10 +174,10 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
     ): IO[Nothing] =
       consumeChunkTracedChunkCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
 
-    override def consumeRecordsTraced[A](
+    override def consumeRecordTraced[A](
         processor: ConsumerRecord[String, String] => IO[A]
     ): IO[Nothing] =
-      consumeRecordsTracedCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
+      consumeRecordTracedCalled.set(true) *> IO.raiseError(new RuntimeException("stop"))
 
     override def receive[A](
         records: Chunk[ConsumerRecord[String, String]]
@@ -219,7 +219,7 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
           Option.empty[CommittableConsumerRecord[IO, String, String]]
         )
         consumeChunkTracedChunkCalled <- Ref[IO].of(false)
-        consumeRecordsTracedCalled <- Ref[IO].of(false)
+        consumeRecordTracedCalled <- Ref[IO].of(false)
         recordsTracedCalled <- Ref[IO].of(false)
       } yield new ConsumerSyntaxProbe(
         underlying,
@@ -228,7 +228,7 @@ final class KafkaConsumerSyntaxSuite extends KafkaTracingTestSupport {
         processedRecord,
         processedCommittable,
         consumeChunkTracedChunkCalled,
-        consumeRecordsTracedCalled,
+        consumeRecordTracedCalled,
         recordsTracedCalled,
         recordsTracedResult
       )

@@ -223,7 +223,7 @@ Import `fs2.kafka.otel4s.trace.syntax._` once and then choose the shape that mat
 
 - `.consumeChunk(...)` for raw, untraced chunk-oriented flows
 - `.consumeChunkTraced(...)` for chunk-callback flows with `receive`, per-record `process`, and owned `commit` spans
-- `.consumeRecordsTraced(...)` for per-record callback flows with `receive`, per-record `process`, and owned `commit` spans
+- `.consumeRecordTraced(...)` for per-record callback flows with `receive`, per-record `process`, and owned `commit` spans
 - `.recordsTraced(...)` for `.records.evalMap(...)`-style flows with `receive` and per-record `process` spans
 - `receiveTraced` and `processTraced` when you need explicit boundaries inside chunked or partitioned streams
 
@@ -231,7 +231,7 @@ Import `fs2.kafka.otel4s.trace.syntax._` once and then choose the shape that mat
 
 ### Chunk-Oriented Syntax
 
-`consumeChunkTraced` and `consumeRecordsTraced` consume chunks from all assigned partitions concurrently. They create a
+`consumeChunkTraced` and `consumeRecordTraced` consume chunks from all assigned partitions concurrently. They create a
 chunk-level `receive` span, add a `process` span for every record, and commit offsets after the callback has completed
 successfully. The owned final offset commit is wrapped in a `commit` span with `messaging.operation.type=settle`.
 
@@ -249,7 +249,7 @@ def consumeChunks(
     .stream[IO, String, String](consumerSettings)
     .subscribeTo("orders")
     .traced(kafkaTracer)
-    .consumeRecordsTraced { record =>
+    .consumeRecordTraced { record =>
       IO.println(s"Processed record: $record")
     }
 ```
